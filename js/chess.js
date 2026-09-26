@@ -375,6 +375,116 @@
     return san;
   }
 
+  function toFEN(state) {
+    const rows = state.board.map((row) => {
+      let out = '', empty = 0;
+      for (const p of row) {
+        if (!p) {
+          empty++;
+          continue;
+        }
+        if (empty) out += empty;
+        empty = 0;
+        out += p.color === 'w' ? p.type.toUpperCase() : p.type;
+      }
+      return out + (empty || '');
+    });
+    const cr = state.castling;
+    const castling = (cr.wK ? 'K' : '') + (cr.wQ ? 'Q' : '') + (cr.bK ? 'k' : '') + (cr.bQ ? 'q' : '') || '-';
+    const ep = state.ep ? squareName(state.ep.r, state.ep.c) : '-';
+    return `${rows.join('/')} ${state.turn} ${castling} ${ep} ${state.halfmove} ${state.fullmove}`;
+  }
+
+  /** UCI long algebraic notation, e.g. "e2e4" or "e7e8q". */
+  function toUCI(move, promotionType) {
+    return squareName(move.from.r, move.from.c) + squareName(move.to.r, move.to.c) +
+      (move.promotion ? promotionType || 'q' : '');
+  }
+
+  /** Find the legal move for a UCI string. Returns { move, promotionType } or null. */
+  function moveFromUCI(state, uci) {
+    const m = /^([a-h][1-8])([a-h][1-8])([qrbn])?$/.exec(uci);
+    if (!m) return null;
+    const fromC = FILES.indexOf(m[1][0]), fromR = 8 - Number(m[1][1]);
+    const toC = FILES.indexOf(m[2][0]), toR = 8 - Number(m[2][1]);
+    const move = legalMovesFrom(state, fromR, fromC).find((mv) => mv.to.r === toR && mv.to.c === toC);
+    if (!move) return null;
+    return { move, promotionType: move.promotion ? m[3] || 'q' : undefined };
+  }
+
+  /** Find the legal move for a SAN string (tolerates missing/extra +, #, !, ? and "0-0"). */
+  function moveFromSAN(state, san) {
+    const clean = (s) => s.replace(/[+#!?]/g, '').replace(/0/g, 'O').replace('=', '');
+    const wanted = clean(san.trim());
+    for (const move of allLegalMoves(state)) {
+      for (const t of move.promotion ? PROMOTION_TYPES : [undefined]) {
+        if (clean(toSAN(state, move, t)) === wanted) return { move, promotionType: t };
+      }
+    }
+    return null;
+  }
+
+  /** Split PGN text into { headers, sans }. Comments, variations and NAGs are ignored. */
+  function parsePGN(text) {
+    const headers = {};
+    const body = text.replace(/^\s*\[(\w+)\s+"((?:[^"\\]|\\.)*)"\]\s*$/gm, (_, key, value) => {
+      headers[key] = value.replace(/\\(.)/g, '$1');
+      return '';
+    });
+    let movetext = body
+      .replace(/\{[^}]*\}/g, ' ')  // {comments}
+      .replace(/;[^\n]*/g, ' ');   // ; comments to end of line
+    // Strip (variations), innermost first so nested ones are handled.
+    let prev;
+    do {
+      prev = movetext;
+      movetext = movetext.replace(/\([^()]*\)/g, ' ');
+    } while (movetext !== prev);
+
+    const sans = movetext
+      .replace(/\$\d+/g, ' ')
+      .replace(/\d+\.(\.\.)?/g, ' ')
+      .split(/\s+/)
+      .filter((tok) => tok && !/^(1-0|0-1|1\/2-1\/2|\*)$/.test(tok));
+    return { headers, sans };
+  }
+
+  /**
+   * Build PGN text. `moves` is a list of { san, comment? }; `start` gives the move number and
+   * side to move of the first position (for games set up from a FEN).
+   */
+  function toPGN(headers, moves, result, start = { fullmove: 1, turn: 'w' }) {
+    const order = ['Event', 'Site', 'Date', 'Round', 'White', 'Black', 'Result'];
+    const keys = [...order.filter((k) => k in headers), ...Object.keys(headers).filter((k) => !order.includes(k))];
+    const head = keys.map((k) => `[${k} "${String(headers[k]).replace(/[\\"]/g, '\\$&')}"]`).join('\n');
+
+    const offset = start.turn === 'b' ? 1 : 0;
+    const tokens = [];
+    moves.forEach((m, i) => {
+      const ply = i + offset;
+      const num = start.fullmove + Math.floor(ply / 2);
+      if (ply % 2 === 0) tokens.push(`${num}.`);
+      else if (i === 0 || moves[i - 1].comment) tokens.push(`${num}...`);
+      tokens.push(m.san);
+      if (m.comment) tokens.push(`{ ${m.comment} }`);
+    });
+    tokens.push(result);
+
+    // Wrap movetext at 80 columns, as the PGN standard recommends.
+    const lines = [];
+    let line = '';
+    for (const tok of tokens) {
+      if (line && line.length + tok.length + 1 > 80) {
+        lines.push(line);
+        line = tok;
+      } else {
+        line = line ? `${line} ${tok}` : tok;
+      }
+    }
+    lines.push(line);
+    return `${head}\n\n${lines.join('\n')}\n`;
+  }
+
   /** Count leaf nodes of the legal move tree (used to verify move generation). */
   function perft(state, depth) {
     if (depth === 0) return 1;
@@ -407,6 +517,12 @@
     getStatus,
     positionKey,
     toSAN,
+    toFEN,
+    toUCI,
+    moveFromUCI,
+    moveFromSAN,
+    parsePGN,
+    toPGN,
     perft,
   };
 
