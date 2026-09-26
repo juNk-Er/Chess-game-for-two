@@ -71,31 +71,47 @@
 
     /**
      * Analyse a FEN position to a fixed depth.
-     * Resolves to { score: { cp } | { mate }, bestmove, pv: [uci...], depth } where the score
-     * is from the side to move's point of view.
+     *
+     * Options:
+     *   depth      search depth (default 14)
+     *   multiPV    number of best lines to report (default 1)
+     *   onInfo     called with the current lines whenever Stockfish reports progress
+     *   cancelled  function; if it returns true when the job's turn comes, the search is skipped
+     *
+     * Resolves to { score, pv, depth, lines, bestmove } (or null if skipped). Scores are
+     * { cp } or { mate } from the side to move's point of view; `lines` is sorted best first.
      */
-    analyze(fen, depth = 14) {
+    analyze(fen, { depth = 14, multiPV = 1, onInfo = null, cancelled = null } = {}) {
       const job = () => new Promise((resolve) => {
-        let last = { score: { cp: 0 }, pv: [], depth: 0 };
+        if (cancelled && cancelled()) {
+          resolve(null);
+          return;
+        }
+        const lines = [];
         const onLine = (line) => {
           if (line.startsWith('info ') && line.includes(' pv ') && !/ (lower|upper)bound /.test(line)) {
             const d = /\bdepth (\d+)/.exec(line);
             const s = /\bscore (cp|mate) (-?\d+)/.exec(line);
+            const m = /\bmultipv (\d+)/.exec(line);
             const pv = / pv (.+)$/.exec(line);
             if (s && pv) {
-              last = {
+              const idx = m ? Number(m[1]) - 1 : 0;
+              lines[idx] = {
                 depth: d ? Number(d[1]) : 0,
                 score: { [s[1]]: Number(s[2]) },
                 pv: pv[1].trim().split(/\s+/),
               };
+              if (onInfo) onInfo(lines.filter(Boolean));
             }
           } else if (line.startsWith('bestmove')) {
             this.listeners.delete(onLine);
             const best = line.split(/\s+/)[1];
-            resolve({ ...last, bestmove: best && best !== '(none)' ? best : null });
+            const top = lines[0] || { score: { cp: 0 }, pv: [], depth: 0 };
+            resolve({ ...top, lines: lines.filter(Boolean), bestmove: best && best !== '(none)' ? best : null });
           }
         };
         this.listeners.add(onLine);
+        this.send('setoption name MultiPV value ' + multiPV);
         this.send('position fen ' + fen);
         this.send('go depth ' + depth);
       });
