@@ -13,6 +13,20 @@ python3 -m http.server 8000
 
 Opening `index.html` directly (file://) also works for playing. Browsers block the Stockfish engine on file:// pages, though, so game analysis needs the page served over HTTP (a local server as above, or GitHub Pages).
 
+## Play on iPhone / iPad / Android
+
+Once the game is hosted (e.g. on GitHub Pages, see below), open its address in **Safari** and tap **Share → Add to Home Screen**. It then works like an app:
+
+- its own icon on the home screen, opening full-screen without the browser bar,
+- **works offline** after the first visit, including Stockfish analysis,
+- touch controls (tap-to-move or drag), and a layout that fits around the notch / Dynamic Island.
+
+Tip: the iPhone's silent switch also mutes the game's sound effects.
+
+### Hosting on GitHub Pages
+
+In the repository on GitHub: **Settings → Pages → Build and deployment → Source: Deploy from a branch**, choose `main` and `/ (root)`, then **Save**. After a minute the game is live at `https://<your-user>.github.io/<repo-name>/`. Free GitHub Pages needs a public repository.
+
 ## Features
 
 **Playing**
@@ -44,8 +58,11 @@ js/chess.js           rules engine: move generation, SAN, FEN, UCI, PGN, perft
 js/engine.js          Stockfish UCI wrapper (Web Worker)
 js/sound.js           synthesized sound effects (Web Audio)
 js/app.js             UI: board, input, clocks, saving, review and analysis
+manifest.webmanifest  home-screen app settings (name, icons, full-screen)
+sw.js                 service worker for offline play
 engine/               Stockfish 19 (stockfish.js 19.0.0 lite single-threaded WASM build)
 assets/pieces/        SVG chess pieces
+assets/icons/         app icons
 ```
 
 The rules engine is independent of the UI and also runs in Node (`require('./js/chess.js')`). Its move generator has been checked against standard perft reference counts.

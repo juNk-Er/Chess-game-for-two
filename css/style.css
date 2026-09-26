@@ -29,9 +29,18 @@
   box-sizing: border-box;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
+  /* Keep content clear of the iPhone notch / Dynamic Island and home indicator. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  -webkit-tap-highlight-color: transparent;
   background: var(--bg);
   color: var(--text);
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -43,6 +52,20 @@ body {
 
 .hidden {
   display: none !important;
+}
+
+/* No double-tap zoom delay on controls. */
+button,
+select,
+input {
+  touch-action: manipulation;
+}
+
+/* No "Save image" pop-up when long-pressing pieces on iOS. */
+img {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .site-header {
@@ -114,7 +137,7 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   user-select: none;
   -webkit-user-select: none;
-  touch-action: none;
+  touch-action: none; /* dragging a piece must not scroll the page */
 }
 
 .arrows {
@@ -822,6 +845,14 @@ body {
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
   font-size: 0.92rem;
   max-width: calc(100vw - 32px);
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .settings select,
+  .settings input[type="text"],
+  .import-box textarea {
+    font-size: 16px;
+  }
 }
 
 @media (max-width: 760px) {

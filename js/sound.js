@@ -93,5 +93,24 @@
     },
   };
 
+  // iOS Safari only allows audio after a user gesture: unlock it on the first touch/click.
+  const unlock = () => {
+    if (!Sound.enabled) return;
+    try {
+      const ac = audio();
+      if (!ac) return;
+      const src = ac.createBufferSource();
+      src.buffer = ac.createBuffer(1, 1, 22050);
+      src.connect(ac.destination);
+      src.start(0);
+    } catch (err) {
+      return;
+    }
+    global.removeEventListener('pointerdown', unlock, true);
+    global.removeEventListener('touchend', unlock, true);
+  };
+  global.addEventListener('pointerdown', unlock, true);
+  global.addEventListener('touchend', unlock, true);
+
   global.Sound = Sound;
 })(window);
