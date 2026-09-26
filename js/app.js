@@ -12,6 +12,8 @@
   const DRAG_THRESHOLD = 5;
   const ANIMATION_MS = 180;
   const LOW_TIME_MS = 10000;
+  const LIVE_DEPTH = 22;       // Explore mode: how deep Stockfish searches each position
+  const LIVE_LINES = 3;        // Explore mode: how many candidate lines to show
 
   // Move classification, as used by Lichess: drop in winning chances on a [-1, 1] scale.
   const CLASSES = {
@@ -24,6 +26,7 @@
 
   const $ = (id) => document.getElementById(id);
   const els = {
+    modeButtons: document.querySelectorAll('.mode-switch button'),
     board: $('board'),
     arrows: $('arrows'),
     evalBar: $('eval-bar'),
@@ -31,6 +34,8 @@
     barBottom: $('bar-bottom'),
     status: $('status'),
     moves: $('moves'),
+    opening: $('opening'),
+    book: $('book'),
     newGame: $('btn-new'),
     undo: $('btn-undo'),
     flip: $('btn-flip'),
@@ -44,12 +49,15 @@
     copyPgn: $('btn-copy-pgn'),
     downloadPgn: $('btn-download-pgn'),
     importPgn: $('btn-import-pgn'),
+    analysisLocked: $('analysis-locked'),
     analyze: $('btn-analyze'),
     progress: $('analysis-progress'),
     analysisError: $('analysis-error'),
     summary: $('analysis-summary'),
     graph: $('eval-graph'),
     positionInfo: $('analysis-position'),
+    engineOn: $('engine-on'),
+    engineLines: $('engine-lines'),
     nameW: $('name-w'),
     nameB: $('name-b'),
     swap: $('btn-swap'),
@@ -79,35 +87,52 @@
   // ---------- State ----------
 
   const settings = {
+    mode: 'play',            // 'play' (a real game) or 'explore' (free analysis board)
     names: { w: 'White', b: 'Black' },
     timeControl: '10,0',
     depth: 14,
     autoFlip: false,
     sound: true,
     flipped: false,
-    tab: 'moves',
+    tabs: { play: 'moves', explore: 'moves' },
+    exploreEngine: false,
   };
-  let score = {};        // player name -> points
+  let score = {};            // player name -> points
 
   /*
-   * game.states[i] is the position after i half-moves; game.history[i] is the move from
-   * states[i] to states[i + 1]. game.clocks[i] and game.analysis[i] belong to states[i].
+   * One game per mode. game.states[i] is the position after i half-moves; game.history[i] is
+   * the move from states[i] to states[i + 1]. game.clocks[i] and game.analysis[i] belong to
+   * states[i]. game.view is the index of the position being looked at, or null for the latest.
    */
+  const games = { play: null, explore: null };
   let game;
-  let view = null;       // index of the position being reviewed, or null for the live position
   let selected = null;
   let targets = [];
   let pendingPromotion = null;
   let drag = null;
   const clock = { running: false, lastTick: 0, time: { w: 0, b: 0 }, warned: { w: false, b: false } };
   const analysis = { running: false, token: 0, error: null };
+  const live = { token: 0, fen: null, state: null, lines: [], running: false, error: null, terminal: null };
+  let openings = null;       // position key -> [ECO, name], loaded on start-up
 
+  const isExplore = () => settings.mode === 'explore';
   const current = () => game.states[game.states.length - 1];
   const lastIndex = () => game.states.length - 1;
-  const shownIndex = () => (view === null ? lastIndex() : view);
-  const isLive = () => view === null;
+  const shownIndex = () => (game.view === null ? lastIndex() : game.view);
+  const shownState = () => game.states[shownIndex()];
+  const isLive = () => game.view === null;
+
+  /** Stockfish review is only offered once a game is over (or for an imported game). */
+  const reviewEnabled = () => !isExplore() && (!!game.result || game.imported);
+
+  /** Can pieces be moved on the board right now? */
+  function boardInteractive() {
+    if (isExplore()) return !(isLive() && game.result); // explore: branch off from any position
+    return isLive() && !game.result;
+  }
 
   function playerName(color) {
+    if (isExplore()) return COLOR_NAMES[color];
     return (game.players && game.players[color]) || settings.names[color] || COLOR_NAMES[color];
   }
 
@@ -141,6 +166,7 @@
       players: null,
       imported: false,
       headers: null,
+      view: null,
     };
   }
 
@@ -149,18 +175,23 @@
     return minutes > 0 ? { minutes, increment } : null;
   }
 
+  function setGame(g) {
+    games[settings.mode] = g;
+    game = g;
+  }
+
   function newGame() {
     cancelAnalysis();
-    game = blankGame(C.createInitialState(), parseTimeControl(settings.timeControl));
+    stopLive();
+    setGame(blankGame(C.createInitialState(), isExplore() ? null : parseTimeControl(settings.timeControl)));
     resetTransientState();
-    if (settings.autoFlip) settings.flipped = false;
+    if (settings.autoFlip && !isExplore()) settings.flipped = false;
     engine.newGame();
     render();
     save();
   }
 
   function resetTransientState() {
-    view = null;
     selected = null;
     targets = [];
     pendingPromotion = null;
@@ -172,11 +203,39 @@
     hideModal(els.gameOver);
   }
 
+  function setMode(mode) {
+    if (mode === settings.mode) return;
+    cancelDrag();
+    clearSelection();
+    if (pendingPromotion) cancelPromotion();
+    hideModal(els.gameOver);
+    cancelAnalysis();
+    stopLive();
+
+    if (!isExplore()) {
+      // Pause the game clock while exploring.
+      tickClock();
+      if (game.clocks) games.play.clockTime = { ...clock.time };
+      clock.running = false;
+    }
+
+    settings.mode = mode;
+    game = games[mode];
+
+    if (!isExplore() && game.clocks) {
+      clock.time = { ...(game.clockTime || game.clocks[game.clocks.length - 1]) };
+      clock.running = game.history.length > 0 && !game.result;
+      clock.lastTick = performance.now();
+    }
+    render();
+    save();
+  }
+
   // ---------- Playing moves ----------
 
   function select(r, c) {
     selected = { r, c };
-    targets = C.legalMovesFrom(current(), r, c);
+    targets = C.legalMovesFrom(shownState(), r, c);
   }
 
   function clearSelection() {
@@ -191,14 +250,28 @@
   function tryMove(move, { animate = true } = {}) {
     if (move.promotion) {
       pendingPromotion = { move, animate };
-      showPromotion(current().turn);
-      render();
+      showPromotion(shownState().turn);
+      renderBoard(null);
       return;
     }
     playMove(move, undefined, { animate });
   }
 
+  /** Explore mode: moving from an earlier position replaces the moves that followed it. */
+  function truncateTo(index) {
+    game.states.length = index + 1;
+    game.keys.length = index + 1;
+    game.history.length = index;
+    game.analysis.length = Math.min(game.analysis.length, index + 1);
+    game.result = null;
+    game.view = null;
+  }
+
   function playMove(move, promotionType, { animate = true } = {}) {
+    if (!isLive()) {
+      if (!isExplore()) return;
+      truncateTo(game.view);
+    }
     const state = current();
     const mover = state.turn;
     tickClock();
@@ -221,8 +294,8 @@
 
     clearSelection();
     pendingPromotion = null;
-    view = null;
-    if (settings.autoFlip) settings.flipped = next.turn === 'b';
+    game.view = null;
+    if (settings.autoFlip && !isExplore()) settings.flipped = next.turn === 'b';
 
     checkGameEnd();
     if (!game.result) Sound.play(soundFor(game.history[game.history.length - 1], next));
@@ -256,14 +329,14 @@
     }
   }
 
-  function endGame(title, reason, winner, { showDialog = true } = {}) {
+  function endGame(title, reason, winner) {
     const code = winner === 'w' ? '1-0' : winner === 'b' ? '0-1' : '1/2-1/2';
     game.result = { title, reason, winner: winner || null, code };
     clock.running = false;
     clearSelection();
-    recordScore();
     Sound.play('end');
-    if (showDialog) {
+    if (!isExplore()) {
+      recordScore();
       els.resultTitle.textContent = title;
       els.resultReason.textContent = reason;
       showModal(els.gameOver);
@@ -271,7 +344,7 @@
   }
 
   function recordScore() {
-    if (game.imported || game.scored) return;
+    if (isExplore() || game.imported || game.scored) return;
     const delta = {};
     const add = (name, pts) => { delta[name] = (delta[name] || 0) + pts; };
     if (game.result.winner) {
@@ -305,6 +378,7 @@
       unrecordScore();
       game.result = null;
       hideModal(els.gameOver);
+      cancelAnalysis(); // the game is on again, so the review closes
     }
     if (game.clocks) {
       // Give back the time spent on the undone move.
@@ -314,15 +388,15 @@
       clock.lastTick = performance.now();
       clock.warned = { w: false, b: false };
     }
-    view = null;
+    game.view = null;
     clearSelection();
-    if (settings.autoFlip) settings.flipped = current().turn === 'b';
+    if (settings.autoFlip && !isExplore()) settings.flipped = current().turn === 'b';
     render({ animation: { move: entry.move, reverse: true } });
     save();
   }
 
   function resign() {
-    if (game.result) return;
+    if (game.result || isExplore()) return;
     const loser = current().turn;
     const winner = C.other(loser);
     if (!confirm(`${playerName(loser)}, do you really want to resign?`)) return;
@@ -332,7 +406,7 @@
   }
 
   function offerDraw() {
-    if (game.result) return;
+    if (game.result || isExplore()) return;
     const offerer = current().turn;
     const opponent = C.other(offerer);
     if (!confirm(`${playerName(offerer)} offers a draw.\n\n${playerName(opponent)}, do you accept?`)) return;
@@ -344,7 +418,7 @@
   // ---------- Clock ----------
 
   function tickClock() {
-    if (!game.clocks || !clock.running || game.result) return;
+    if (isExplore() || !game.clocks || !clock.running || game.result) return;
     const now = performance.now();
     const turn = current().turn;
     clock.time[turn] -= now - clock.lastTick;
@@ -387,7 +461,7 @@
   }
 
   function renderClocks() {
-    if (!game.clocks) return;
+    if (isExplore() || !game.clocks) return;
     // While reviewing, show the clocks as they were at that moment.
     const times = isLive() ? clock.time : game.clocks[shownIndex()];
     for (const color of ['w', 'b']) {
@@ -408,26 +482,50 @@
 
   // ---------- Save & resume ----------
 
+  function serializeGame(g, clockTime) {
+    return {
+      startFen: g.startFen,
+      moves: g.history.map((h) => h.uci),
+      clocks: g.clocks,
+      clockTime: g.clocks ? clockTime : null,
+      timeControl: g.timeControl,
+      result: g.result,
+      analysis: g.analysis,
+      scored: g.scored,
+      date: g.date,
+      players: g.players,
+      imported: g.imported,
+      headers: g.headers,
+    };
+  }
+
+  function deserializeGame(s) {
+    const g = rebuildGame(s.startFen, s.moves, s.timeControl);
+    Object.assign(g, {
+      clocks: s.clocks && s.clocks.length === s.moves.length + 1 ? s.clocks : g.clocks,
+      clockTime: s.clockTime || null,
+      result: s.result,
+      analysis: (s.analysis || []).slice(0, s.moves.length + 1),
+      scored: s.scored,
+      date: s.date || g.date,
+      players: s.players,
+      imported: !!s.imported,
+      headers: s.headers,
+    });
+    return g;
+  }
+
   function save() {
     lastSave = performance.now();
+    if (!isExplore() && games.play.clocks) games.play.clockTime = { ...clock.time };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        version: 1,
+        version: 2,
         settings,
         score,
-        game: {
-          startFen: game.startFen,
-          moves: game.history.map((h) => h.uci),
-          clocks: game.clocks,
-          clockTime: game.clocks ? clock.time : null,
-          timeControl: game.timeControl,
-          result: game.result,
-          analysis: game.analysis,
-          scored: game.scored,
-          date: game.date,
-          players: game.players,
-          imported: game.imported,
-          headers: game.headers,
+        games: {
+          play: serializeGame(games.play, games.play.clockTime),
+          explore: serializeGame(games.explore, null),
         },
       }));
     } catch (err) {
@@ -442,35 +540,36 @@
     } catch (err) {
       data = null;
     }
-    if (!data || data.version !== 1) return false;
+    if (!data || (data.version !== 1 && data.version !== 2)) return false;
 
-    Object.assign(settings, data.settings || {});
-    settings.names = { w: 'White', b: 'Black', ...(data.settings && data.settings.names) };
+    const saved = data.settings || {};
+    Object.assign(settings, saved);
+    settings.names = { w: 'White', b: 'Black', ...saved.names };
+    settings.tabs = { play: 'moves', explore: 'moves', ...saved.tabs };
+    if (settings.mode !== 'explore') settings.mode = 'play';
+    delete settings.tab; // version 1 kept a single tab
     score = data.score || {};
 
-    const g = data.game;
-    if (!g) return false;
-    try {
-      const rebuilt = rebuildGame(g.startFen, g.moves, g.timeControl);
-      Object.assign(rebuilt, {
-        clocks: g.clocks && g.clocks.length === g.moves.length + 1 ? g.clocks : rebuilt.clocks,
-        result: g.result,
-        analysis: (g.analysis || []).slice(0, g.moves.length + 1),
-        scored: g.scored,
-        date: g.date || rebuilt.date,
-        players: g.players,
-        imported: !!g.imported,
-        headers: g.headers,
-      });
-      game = rebuilt;
-    } catch (err) {
-      return false;
+    // Version 1 saved only the (play) game.
+    const stored = data.version === 1 ? { play: data.game } : data.games || {};
+    for (const mode of ['play', 'explore']) {
+      try {
+        games[mode] = stored[mode] ? deserializeGame(stored[mode]) : null;
+      } catch (err) {
+        games[mode] = null;
+      }
     }
+    if (!games.play) games.play = blankGame(C.createInitialState(), parseTimeControl(settings.timeControl));
+    if (!games.explore) games.explore = blankGame(C.createInitialState(), null);
+    if (data.version === 1 && data.game) games.play.clockTime = data.game.clockTime;
+
+    game = games[settings.mode];
     resetTransientState();
-    if (game.clocks && g.clockTime) {
-      clock.time = { ...g.clockTime };
+    const play = games.play;
+    if (play.clocks) {
+      clock.time = { ...(play.clockTime || play.clocks[play.clocks.length - 1]) };
       // Resume a running clock; time spent with the page closed is not counted.
-      clock.running = game.history.length > 0 && !game.result;
+      clock.running = !isExplore() && play.history.length > 0 && !play.result;
       clock.lastTick = performance.now();
     }
     return true;
@@ -499,25 +598,110 @@
 
   window.addEventListener('pagehide', save);
 
+  // ---------- Openings ----------
+
+  const openingKey = (state) => C.toFEN(state).split(' ').slice(0, 3).join(' ');
+
+  function loadOpenings() {
+    fetch('data/openings.json')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data) return;
+        openings = data;
+        renderOpening();
+      })
+      .catch(() => {}); // e.g. opened as file:// — the game works without opening names
+  }
+
+  /** The named opening for the shown position: the deepest named position on the way to it. */
+  function openingAt(index) {
+    if (!openings) return null;
+    for (let i = index; i >= 0; i--) {
+      const hit = openings[openingKey(game.states[i])];
+      if (hit) return { eco: hit[0], name: hit[1], exact: i === index };
+    }
+    return null;
+  }
+
+  /** Moves from the shown position that lead to a named opening position. */
+  function bookMoves(state) {
+    if (!openings) return [];
+    const out = [];
+    for (const move of C.allLegalMoves(state)) {
+      if (move.promotion) continue;
+      const next = C.makeMove(state, move).state;
+      const hit = openings[openingKey(next)];
+      if (hit) out.push({ move, san: C.toSAN(state, move), eco: hit[0], name: hit[1] });
+    }
+    return out.sort((a, b) => a.eco.localeCompare(b.eco) || a.name.localeCompare(b.name));
+  }
+
+  function renderOpening() {
+    const idx = shownIndex();
+    const op = openingAt(idx);
+    if (idx === 0 && game.startFen === C.START_FEN) {
+      els.opening.innerHTML = '<span class="eco">—</span> Starting position';
+    } else if (op) {
+      els.opening.innerHTML = `<span class="eco">${op.eco}</span> ${escapeHTML(op.name)}`;
+    } else {
+      els.opening.innerHTML = openings ? '<span class="muted">Out of the opening book</span>' : '';
+    }
+    els.opening.classList.toggle('hidden', !els.opening.innerHTML);
+
+    els.book.classList.toggle('hidden', !isExplore());
+    if (!isExplore()) return;
+    const moves = bookMoves(shownState());
+    els.book.innerHTML = `<h3>Book moves</h3>` + (moves.length
+      ? `<ul>${moves.map((m, i) =>
+        `<li><button class="book-move" data-i="${i}"><b>${m.san}</b> <span class="eco">${m.eco}</span> ${escapeHTML(m.name)}</button></li>`
+      ).join('')}</ul>`
+      : `<p class="hint">${openings ? 'No known opening continues from here.' : 'Opening names need the page served over http(s).'}</p>`);
+    els.book.bookMoves = moves;
+  }
+
+  els.book.addEventListener('click', (e) => {
+    const btn = e.target.closest('.book-move');
+    if (!btn || !boardInteractive()) return;
+    const m = els.book.bookMoves[Number(btn.dataset.i)];
+    if (m) playMove(m.move);
+  });
+
   // ---------- Rendering ----------
 
   function render({ animation = null } = {}) {
+    renderModeUI();
     renderBoard(animation);
     renderArrows();
     renderEvalBar();
     renderPlayerBars();
     renderStatus();
     renderMoves();
+    renderOpening();
     renderAnalysis();
+    renderEngine();
     renderSettings();
     renderClocks();
     renderTabs();
 
-    const live = isLive();
     els.undo.disabled = game.history.length === 0;
     els.draw.disabled = els.resign.disabled = !!game.result || game.history.length === 0;
     els.navFirst.disabled = els.navPrev.disabled = shownIndex() === 0;
-    els.navNext.disabled = els.navLast.disabled = live;
+    els.navNext.disabled = els.navLast.disabled = isLive();
+    updateLiveAnalysis();
+  }
+
+  function renderModeUI() {
+    const explore = isExplore();
+    document.body.classList.toggle('explore', explore);
+    els.modeButtons.forEach((b) => {
+      const on = b.dataset.mode === settings.mode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on);
+    });
+    els.newGame.textContent = explore ? 'Reset board' : 'New game';
+    els.undo.textContent = explore ? 'Take back' : 'Undo';
+    els.draw.classList.toggle('hidden', explore);
+    els.resign.classList.toggle('hidden', explore);
   }
 
   function displayCoords(r, c) {
@@ -529,8 +713,8 @@
     const state = game.states[idx];
     const last = idx > 0 ? game.history[idx - 1] : null;
     const checkedKing = C.inCheck(state.board, state.turn) ? C.findKing(state.board, state.turn) : null;
-    const interactive = isLive() && !game.result;
-    const badge = last ? classify(idx - 1) : null;
+    const interactive = boardInteractive();
+    const badge = last && reviewEnabled() ? classify(idx - 1) : null;
     const html = [];
 
     for (let i = 0; i < 8; i++) {
@@ -562,7 +746,7 @@
       }
     }
     els.board.innerHTML = html.join('');
-    els.board.classList.toggle('reviewing', !isLive());
+    els.board.classList.toggle('reviewing', !interactive);
     if (animation) animateMove(animation.move, animation.reverse);
   }
 
@@ -598,13 +782,23 @@
   }
 
   function renderArrows() {
-    const entry = game.analysis[shownIndex()];
-    let svg = '';
-    if (entry && entry.best) {
-      const found = C.moveFromUCI(game.states[shownIndex()], entry.best);
-      if (found) svg = arrowSVG(found.move.from, found.move.to, 'best-arrow');
+    const state = shownState();
+    const arrows = [];
+    if (isExplore()) {
+      if (settings.exploreEngine && live.state === state) {
+        live.lines.forEach((line, i) => {
+          if (line.pv[0]) arrows.push({ uci: line.pv[0], cls: i === 0 ? 'best-arrow' : 'alt-arrow' });
+        });
+      }
+    } else if (reviewEnabled()) {
+      const entry = game.analysis[shownIndex()];
+      if (entry && entry.best) arrows.push({ uci: entry.best, cls: 'best-arrow' });
     }
-    els.arrows.innerHTML = svg;
+    // Draw weaker suggestions first so the best one ends up on top.
+    els.arrows.innerHTML = arrows.reverse().map(({ uci, cls }) => {
+      const found = C.moveFromUCI(state, uci);
+      return found ? arrowSVG(found.move.from, found.move.to, cls) : '';
+    }).join('');
   }
 
   function arrowSVG(from, to, cls) {
@@ -648,19 +842,21 @@
     const advantage = material(color) - material(C.other(color));
     const name = playerName(color);
     const pts = score[name];
-    const toMove = isLive() && !game.result && current().turn === color;
+    const toMove = !game.result && shownState().turn === color && (isLive() || isExplore());
+    const showScore = !isExplore() && !game.imported && pts !== undefined;
+    const showClock = !isExplore() && game.clocks;
 
     el.innerHTML = `
       <div class="player-name${toMove ? ' to-move' : ''}">
         <span class="swatch ${color}"></span>
         <span class="name">${escapeHTML(name)}</span>
-        ${pts !== undefined && !game.imported ? `<span class="score" title="Points">${formatPoints(pts)}</span>` : ''}
+        ${showScore ? `<span class="score" title="Points">${formatPoints(pts)}</span>` : ''}
       </div>
       <div class="captured">
         ${taken.map((p) => pieceImg(p, 'mini')).join('')}
         ${advantage > 0 ? `<span class="advantage">+${advantage}</span>` : ''}
       </div>
-      <div class="clock ${game.clocks ? '' : 'hidden'}" id="clock-${color}"></div>`;
+      <div class="clock ${showClock ? '' : 'hidden'}" id="clock-${color}"></div>`;
   }
 
   function formatPoints(p) {
@@ -670,18 +866,18 @@
   }
 
   function renderStatus() {
-    const state = current();
+    const state = shownState();
     els.status.className = 'status';
 
-    if (!isLive()) {
+    if (!isLive() && !isExplore()) {
       els.status.classList.add('reviewing');
       const idx = shownIndex();
       const label = idx === 0 ? 'the start position' : `${moveLabel(idx - 1)}`;
-      els.status.innerHTML = `Reviewing ${escapeHTML(label)} <button class="link" id="back-live">Back to game ⏭</button>`;
+      els.status.innerHTML = `Reviewing ${escapeHTML(label)} <button class="link" id="back-live">Back to the end ⏭</button>`;
       $('back-live').addEventListener('click', () => goTo(lastIndex()));
       return;
     }
-    if (game.result) {
+    if (game.result && isLive()) {
       els.status.classList.add('over');
       els.status.textContent = `${game.result.title} — ${game.result.reason}`;
       return;
@@ -690,7 +886,8 @@
     if (check) els.status.classList.add('check');
     els.status.innerHTML =
       `<span class="turn-dot ${state.turn}"></span>` +
-      `${escapeHTML(playerName(state.turn))} to move${check ? ' — Check!' : ''}`;
+      `${escapeHTML(playerName(state.turn))} to move${check ? ' — Check!' : ''}` +
+      (isExplore() ? '<span class="mode-tag">Explore</span>' : '');
   }
 
   /** "12. Nf3" or "12... Nc6" for history index i. */
@@ -704,14 +901,17 @@
   function renderMoves() {
     const { history } = game;
     if (!history.length) {
-      els.moves.innerHTML = '<li class="empty">No moves yet. White starts.</li>';
+      els.moves.innerHTML = `<li class="empty">${isExplore()
+        ? 'Make moves for both sides to explore. Tap a book move below to follow a known opening.'
+        : 'No moves yet. White starts.'}</li>`;
       return;
     }
     const shown = shownIndex();
+    const showAnnotations = reviewEnabled();
     const offset = game.states[0].turn === 'b' ? 1 : 0; // games from a FEN may start with Black
     const cell = (i) => {
       if (i < 0 || i >= history.length) return '<span></span>';
-      const cls = classify(i);
+      const cls = showAnnotations ? classify(i) : null;
       const info = CLASSES[cls];
       const annot = info && cls !== 'best' ? `<span class="annot ${cls}" title="${info.label}">${info.symbol}</span>` : '';
       return `<button class="move${shown === i + 1 ? ' current' : ''}" data-index="${i + 1}">${history[i].san}${annot}</button>`;
@@ -722,9 +922,20 @@
       rows.push(`<li><span class="num">${num}.</span>${cell(p - offset)}${cell(p + 1 - offset)}</li>`);
     }
     els.moves.innerHTML = rows.join('');
-    const cur = els.moves.querySelector('.current');
-    if (cur) cur.scrollIntoView({ block: 'nearest' });
-    else els.moves.scrollTop = els.moves.scrollHeight;
+    scrollMoveListTo(els.moves.querySelector('.current'));
+  }
+
+  /** Scroll only inside the move list, never the page itself. */
+  function scrollMoveListTo(el) {
+    const list = els.moves;
+    if (!el) {
+      list.scrollTop = list.scrollHeight;
+      return;
+    }
+    const top = el.offsetTop;
+    const bottom = top + el.offsetHeight;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
   }
 
   function renderSettings() {
@@ -740,23 +951,35 @@
     els.scoreLine.textContent = `Score: ${w} ${formatPoints(score[w] || 0)} – ${formatPoints(score[b] || 0)} ${b}`;
   }
 
+  function currentTab() {
+    const tab = settings.tabs[settings.mode] || 'moves';
+    // The Analysis tab belongs to Play mode, the Engine tab to Explore mode.
+    if (isExplore() && tab === 'analysis') return 'engine';
+    if (!isExplore() && tab === 'engine') return 'analysis';
+    return tab;
+  }
+
   function renderTabs() {
+    const active = currentTab();
     els.tabs.forEach((t) => {
-      const on = t.dataset.tab === settings.tab;
+      const name = t.dataset.tab;
+      const available = isExplore() ? name !== 'analysis' : name !== 'engine';
+      t.classList.toggle('hidden', !available);
+      const on = name === active;
       t.classList.toggle('active', on);
       t.setAttribute('aria-selected', on);
-      $(`tab-${t.dataset.tab}`).classList.toggle('hidden', !on);
+      $(`tab-${name}`).classList.toggle('hidden', !on);
     });
   }
 
-  // ---------- Review navigation ----------
+  // ---------- Navigation ----------
 
   function goTo(index) {
     const target = Math.max(0, Math.min(lastIndex(), index));
     const from = shownIndex();
     if (target === from) return;
     clearSelection();
-    view = target === lastIndex() ? null : target;
+    game.view = target === lastIndex() ? null : target;
 
     let animation = null;
     if (target === from + 1) {
@@ -768,15 +991,59 @@
     render({ animation });
   }
 
-  // ---------- Stockfish analysis ----------
+  // ---------- Evaluation helpers ----------
 
   function winChance(entry) {
     if (!entry) return 0;
     if (entry.terminal === 'checkmate') return entry.winner === 'w' ? 1 : -1;
     if (entry.terminal === 'draw') return 0;
-    if (entry.mate !== undefined) return entry.mate > 0 ? 1 : -1;
+    if (entry.mate !== undefined) return entry.mate > 0 ? 1 : entry.mate < 0 ? -1 : 0;
     return 2 / (1 + Math.exp(-0.00368208 * entry.cp)) - 1;
   }
+
+  function formatEval(entry, { long = false } = {}) {
+    if (!entry) return '–';
+    if (entry.terminal === 'checkmate') return entry.winner === 'w' ? '1-0' : '0-1';
+    if (entry.terminal === 'draw') return '½-½';
+    if (entry.mate !== undefined) return `${entry.mate < 0 ? '-' : ''}M${Math.abs(entry.mate)}`;
+    const v = entry.cp / 100;
+    return (v > 0 ? '+' : '') + v.toFixed(long ? 2 : 1);
+  }
+
+  /** Convert an engine score (side to move's view) to White's point of view. */
+  function whiteScore(score, turn) {
+    const sign = turn === 'w' ? 1 : -1;
+    return score.mate !== undefined ? { mate: score.mate * sign } : { cp: score.cp * sign };
+  }
+
+  function terminalEntry(state) {
+    const status = C.getStatus(state);
+    if (status === 'checkmate') return { terminal: 'checkmate', winner: C.other(state.turn) };
+    if (status === 'stalemate' || status === 'insufficient') return { terminal: 'draw' };
+    return null;
+  }
+
+  function renderEvalBar() {
+    let entry = null, show = false;
+    if (isExplore()) {
+      show = settings.exploreEngine;
+      if (live.state === shownState()) entry = live.terminal || (live.lines[0] ? live.lines[0].eval : null);
+    } else if (reviewEnabled() && game.analysis.some(Boolean)) {
+      show = true;
+      entry = game.analysis[shownIndex()];
+    }
+    els.evalBar.classList.toggle('invisible', !show);
+    if (!show) return;
+    const whitePct = 50 + 50 * winChance(entry);
+    els.evalBar.classList.toggle('flipped', settings.flipped);
+    els.evalBar.querySelector('.eval-fill').style.height = `${whitePct}%`;
+    const label = els.evalBar.querySelector('.eval-label');
+    label.textContent = formatEval(entry).replace(/^\+/, '');
+    // Put the number on the side that is ahead, like most chess sites.
+    label.classList.toggle('white-side', whitePct >= 50);
+  }
+
+  // ---------- Game review (Play mode, after the game) ----------
 
   /** Classification of history[i]: 'best' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | null. */
   function classify(i) {
@@ -802,15 +1069,6 @@
     return Math.max(0, Math.min(100, acc));
   }
 
-  function formatEval(entry, { long = false } = {}) {
-    if (!entry) return '–';
-    if (entry.terminal === 'checkmate') return entry.winner === 'w' ? '1-0' : '0-1';
-    if (entry.terminal === 'draw') return '½-½';
-    if (entry.mate !== undefined) return `${entry.mate < 0 ? '-' : ''}M${Math.abs(entry.mate)}`;
-    const v = entry.cp / 100;
-    return (v > 0 ? '+' : '') + v.toFixed(long ? 2 : 1);
-  }
-
   function analyzedCount() {
     let n = 0;
     for (let i = 0; i < game.states.length; i++) if (game.analysis[i]) n++;
@@ -818,34 +1076,26 @@
   }
 
   async function runAnalysis() {
-    if (analysis.running) return;
+    if (analysis.running || !reviewEnabled()) return;
     const token = ++analysis.token;
+    const g = game;
     analysis.running = true;
     analysis.error = null;
     refreshAnalysisViews();
 
     try {
-      for (let i = 0; i < game.states.length; i++) {
+      for (let i = 0; i < g.states.length; i++) {
         if (token !== analysis.token) return;
-        if (game.analysis[i]) continue;
-        const state = game.states[i];
-        const status = C.getStatus(state);
-        let entry;
-        if (status === 'checkmate') {
-          entry = { terminal: 'checkmate', winner: C.other(state.turn) };
-        } else if (status === 'stalemate' || status === 'insufficient') {
-          entry = { terminal: 'draw' };
-        } else {
-          const res = await engine.analyze(C.toFEN(state), settings.depth);
+        if (g.analysis[i]) continue;
+        const state = g.states[i];
+        let entry = terminalEntry(state);
+        if (!entry) {
+          const res = await engine.analyze(C.toFEN(state), { depth: settings.depth });
           // Ignore the result if the game changed while Stockfish was thinking.
-          if (token !== analysis.token || game.states[i] !== state) return;
-          const sign = state.turn === 'w' ? 1 : -1;
-          entry = res.score.mate !== undefined ? { mate: res.score.mate * sign } : { cp: res.score.cp * sign };
-          entry.best = res.bestmove;
-          entry.pv = res.pv.slice(0, 10);
-          entry.depth = res.depth;
+          if (token !== analysis.token || g.states[i] !== state || !res) return;
+          entry = { ...whiteScore(res.score, state.turn), best: res.bestmove, pv: res.pv.slice(0, 10), depth: res.depth };
         }
-        game.analysis[i] = entry;
+        g.analysis[i] = entry;
         refreshAnalysisViews();
       }
     } catch (err) {
@@ -874,21 +1124,18 @@
     renderAnalysis();
   }
 
-  function renderEvalBar() {
-    const any = game.analysis.some(Boolean);
-    els.evalBar.classList.toggle('invisible', !any);
-    if (!any) return;
-    const entry = game.analysis[shownIndex()];
-    const whitePct = 50 + 50 * winChance(entry);
-    els.evalBar.classList.toggle('flipped', settings.flipped);
-    els.evalBar.querySelector('.eval-fill').style.height = `${whitePct}%`;
-    const label = els.evalBar.querySelector('.eval-label');
-    label.textContent = formatEval(entry).replace(/^\+/, '');
-    // Put the number on the side that is ahead, like most chess sites.
-    label.classList.toggle('white-side', whitePct >= 50);
-  }
-
   function renderAnalysis() {
+    if (isExplore()) return;
+    const enabled = reviewEnabled();
+    els.analysisLocked.classList.toggle('hidden', enabled);
+    for (const el of [els.analyze, els.summary, els.positionInfo]) el.classList.toggle('hidden', !enabled);
+    if (!enabled) {
+      els.progress.classList.add('hidden');
+      els.analysisError.classList.add('hidden');
+      els.graph.classList.add('hidden');
+      return;
+    }
+
     const total = game.states.length;
     const done = analyzedCount();
     const complete = done === total;
@@ -897,12 +1144,10 @@
     els.analyze.textContent = analysis.running
       ? `Analyzing… ${Math.round((done / total) * 100)}%`
       : game.history.length === 0
-        ? 'Play some moves to analyze'
+        ? 'No moves to analyze'
         : complete
           ? `Analyzed by ${engine.name.replace(/ WASM$/, '')}`
-          : done > 1
-            ? 'Analyze new moves'
-            : 'Analyze game with Stockfish 19';
+          : 'Analyze game with Stockfish 19';
 
     els.progress.classList.toggle('hidden', !analysis.running);
     els.progress.querySelector('.progress-fill').style.width = `${(done / total) * 100}%`;
@@ -915,7 +1160,8 @@
   }
 
   function renderSummary() {
-    const stats = { w: { acc: [], inaccuracy: 0, mistake: 0, blunder: 0, best: 0 }, b: { acc: [], inaccuracy: 0, mistake: 0, blunder: 0, best: 0 } };
+    const blank = () => ({ acc: [], inaccuracy: 0, mistake: 0, blunder: 0, best: 0 });
+    const stats = { w: blank(), b: blank() };
     let any = false;
     game.history.forEach((m, i) => {
       const cls = classify(i);
@@ -932,17 +1178,17 @@
       return;
     }
     const avg = (a) => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : '–');
-    const row = (label, key, cls) =>
-      `<tr><th>${label}</th><td class="${cls || ''}">${stats.w[key]}</td><td class="${cls || ''}">${stats.b[key]}</td></tr>`;
+    const row = (label, key) =>
+      `<tr><th>${label}</th><td class="${key}">${stats.w[key]}</td><td class="${key}">${stats.b[key]}</td></tr>`;
     els.summary.innerHTML = `
       <table class="summary">
         <thead><tr><th></th><th>${escapeHTML(playerName('w'))}</th><th>${escapeHTML(playerName('b'))}</th></tr></thead>
         <tbody>
           <tr><th>Accuracy</th><td class="acc">${avg(stats.w.acc)}%</td><td class="acc">${avg(stats.b.acc)}%</td></tr>
-          ${row('★ Best moves', 'best', 'best')}
-          ${row('?! Inaccuracies', 'inaccuracy', 'inaccuracy')}
-          ${row('? Mistakes', 'mistake', 'mistake')}
-          ${row('?? Blunders', 'blunder', 'blunder')}
+          ${row('★ Best moves', 'best')}
+          ${row('?! Inaccuracies', 'inaccuracy')}
+          ${row('? Mistakes', 'mistake')}
+          ${row('?? Blunders', 'blunder')}
         </tbody>
       </table>`;
   }
@@ -1035,11 +1281,123 @@
     goTo(Math.round(((e.clientX - rect.left) / rect.width) * lastIndex()));
   });
 
+  // ---------- Live engine (Explore mode) ----------
+
+  /** Keep Stockfish analysing whatever position is shown in Explore mode. */
+  function updateLiveAnalysis() {
+    if (!isExplore() || !settings.exploreEngine) {
+      if (live.state) stopLive();
+      return;
+    }
+    const state = shownState();
+    if (live.state === state) return;
+    stopLive();
+    live.state = state;
+    live.fen = C.toFEN(state);
+    live.lines = [];
+    live.error = null;
+    live.terminal = terminalEntry(state);
+    if (live.terminal) {
+      renderLive();
+      return;
+    }
+
+    const token = ++live.token;
+    const isCurrent = () => token === live.token;
+    let lastPaint = 0;
+    live.running = true;
+    engine.analyze(live.fen, {
+      depth: LIVE_DEPTH,
+      multiPV: LIVE_LINES,
+      cancelled: () => !isCurrent(),
+      onInfo: (lines) => {
+        if (!isCurrent()) return;
+        live.lines = lines.map((l) => ({ eval: whiteScore(l.score, state.turn), pv: l.pv, depth: l.depth }));
+        const now = performance.now();
+        if (now - lastPaint > 150) {
+          lastPaint = now;
+          renderLive();
+        }
+      },
+    }).then((res) => {
+      if (!isCurrent()) return;
+      live.running = false;
+      if (res) live.lines = res.lines.map((l) => ({ eval: whiteScore(l.score, state.turn), pv: l.pv, depth: l.depth }));
+      renderLive();
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      live.running = false;
+      live.error = err.message || String(err);
+      renderLive();
+    });
+    renderLive();
+  }
+
+  function stopLive() {
+    if (live.running) engine.stop();
+    live.token++;
+    live.running = false;
+    live.state = null;
+    live.lines = [];
+    live.terminal = null;
+  }
+
+  function renderLive() {
+    renderArrows();
+    renderEvalBar();
+    renderEngine();
+  }
+
+  function renderEngine() {
+    if (!isExplore()) return;
+    els.engineOn.checked = settings.exploreEngine;
+    if (!settings.exploreEngine) {
+      els.engineLines.innerHTML = '<p class="hint">Turn on Stockfish to see the evaluation and the best moves for any position you set up. It keeps thinking as you move.</p>';
+      return;
+    }
+    if (live.error) {
+      els.engineLines.innerHTML = `<p class="error">${escapeHTML(live.error)}</p>`;
+      return;
+    }
+    if (live.terminal) {
+      els.engineLines.innerHTML = `<p><b>${live.terminal.terminal === 'checkmate' ? 'Checkmate' : 'Draw'}</b> — ${formatEval(live.terminal)}</p>`;
+      return;
+    }
+    const state = shownState();
+    if (live.state !== state || !live.lines.length) {
+      els.engineLines.innerHTML = '<p class="hint">Stockfish is thinking…</p>';
+      return;
+    }
+    const depth = Math.max(...live.lines.map((l) => l.depth));
+    els.engineLines.innerHTML = `
+      <p class="engine-status">${escapeHTML(engine.name.replace(/ WASM$/, ''))} · depth ${depth}${live.running ? ' <span class="spinner" aria-hidden="true"></span>' : ''}</p>
+      <ol class="engine-lines">${live.lines.map((l, i) => `
+        <li><button class="engine-line-btn" data-i="${i}" title="Play the first move of this line">
+          <span class="eval-chip${i ? ' alt' : ''}">${formatEval(l.eval, { long: true })}</span>
+          <span class="pv">${pvToSan(state, l.pv, 10)}</span>
+        </button></li>`).join('')}
+      </ol>`;
+  }
+
+  els.engineLines.addEventListener('click', (e) => {
+    const btn = e.target.closest('.engine-line-btn');
+    if (!btn || !boardInteractive()) return;
+    const line = live.lines[Number(btn.dataset.i)];
+    const found = line && C.moveFromUCI(shownState(), line.pv[0]);
+    if (found) playMove(found.move, found.promotionType);
+  });
+
+  els.engineOn.addEventListener('change', () => {
+    settings.exploreEngine = els.engineOn.checked;
+    render();
+    save();
+  });
+
   // ---------- PGN ----------
 
   function buildPGN() {
     const headers = {
-      Event: 'Casual game',
+      Event: isExplore() ? 'Analysis' : 'Casual game',
       Site: 'Chess for Two',
       Date: game.date,
       Round: '-',
@@ -1053,16 +1411,22 @@
       headers.SetUp = '1';
       headers.FEN = game.startFen;
     }
+    const op = openingAt(lastIndex());
+    if (op) {
+      headers.ECO = op.eco;
+      headers.Opening = op.name;
+    }
 
+    const review = reviewEnabled();
     const moves = game.history.map((h, i) => {
       const bits = [];
-      const cls = classify(i);
+      const cls = review ? classify(i) : null;
       const info = CLASSES[cls];
       if (info && cls !== 'best') {
         const best = uciToSan(game.states[i], game.analysis[i].best);
         bits.push(`${info.label}.${best ? ` ${best} was best.` : ''}`);
       }
-      if (game.analysis[i + 1] && !game.analysis[i + 1].terminal) {
+      if (review && game.analysis[i + 1] && !game.analysis[i + 1].terminal) {
         const e = game.analysis[i + 1];
         bits.push(`[%eval ${e.mate !== undefined ? '#' + e.mate : (e.cp / 100).toFixed(2)}]`);
       }
@@ -1094,30 +1458,35 @@
     if (!sans.length && !headers.FEN) throw new Error('No moves found in that text.');
 
     cancelAnalysis();
+    stopLive();
+    clock.running = false;
+    if (isExplore()) {
+      // Explore: just load the line onto the board.
+      setGame(g);
+      resetTransientState();
+      render();
+      save();
+      return;
+    }
+
     g.imported = true;
     g.players = { w: headers.White || 'White', b: headers.Black || 'Black' };
     g.headers = {};
     for (const key of ['Event', 'Site', 'Date', 'Round']) if (headers[key]) g.headers[key] = headers[key];
     if (headers.Date) g.date = headers.Date;
-    game = g;
+    setGame(g);
     resetTransientState();
 
     const code = headers.Result;
     if (code === '1-0' || code === '0-1' || code === '1/2-1/2') {
       const winner = code === '1-0' ? 'w' : code === '0-1' ? 'b' : null;
-      game.result = {
-        title: winner ? `${playerName(winner)} won` : 'Draw',
-        reason: 'Imported game.',
-        winner,
-        code,
-      };
+      game.result = { title: winner ? `${playerName(winner)} won` : 'Draw', reason: 'Imported game.', winner, code };
     } else {
       checkGameEnd(); // an unfinished game may still end in mate on the board
     }
     hideModal(els.gameOver);
-    settings.tab = 'moves';
-    view = game.history.length ? 0 : null; // start the review from the first position
-    if (view === lastIndex()) view = null;
+    settings.tabs.play = 'moves';
+    game.view = game.history.length ? 0 : null; // start the review from the first position
     render();
     save();
   }
@@ -1150,7 +1519,9 @@
     const a = document.createElement('a');
     const safe = (s) => s.replace(/[^\w-]+/g, '_');
     a.href = URL.createObjectURL(blob);
-    a.download = `${safe(playerName('w'))}_vs_${safe(playerName('b'))}_${game.date.replace(/\./g, '-')}.pgn`;
+    a.download = isExplore()
+      ? `analysis_${game.date.replace(/\./g, '-')}.pgn`
+      : `${safe(playerName('w'))}_vs_${safe(playerName('b'))}_${game.date.replace(/\./g, '-')}.pgn`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1160,7 +1531,7 @@
   els.importPgn.addEventListener('click', () => {
     els.importError.classList.add('hidden');
     showModal(els.importDialog);
-    els.pgnInput.focus();
+    els.pgnInput.focus({ preventScroll: true });
   });
   els.importCancel.addEventListener('click', () => hideModal(els.importDialog));
   els.pgnFile.addEventListener('change', async () => {
@@ -1171,13 +1542,13 @@
   els.importLoad.addEventListener('click', () => {
     const text = els.pgnInput.value.trim();
     if (!text) return;
-    if (game.history.length && !game.result && !game.imported &&
+    if (!isExplore() && game.history.length && !game.result && !game.imported &&
         !confirm('Load this game? The game in progress will be lost.')) return;
     try {
       importPGN(text);
       hideModal(els.importDialog);
       els.pgnInput.value = '';
-      showToast('Game loaded — use ▶ or → to step through it');
+      showToast(isExplore() ? 'Line loaded onto the board' : 'Game loaded — use ▶ or → to step through it');
     } catch (err) {
       els.importError.textContent = err.message;
       els.importError.classList.remove('hidden');
@@ -1191,13 +1562,13 @@
       `<button type="button" data-type="${t}" aria-label="${PIECE_NAMES[t]}">${pieceImg({ type: t, color })}</button>`
     ).join('');
     showModal(els.promotion);
-    els.promoChoices.querySelector('button').focus();
+    els.promoChoices.querySelector('button').focus({ preventScroll: true });
   }
 
   function cancelPromotion() {
     pendingPromotion = null;
     hideModal(els.promotion);
-    render();
+    renderBoard(null);
   }
 
   els.promoChoices.addEventListener('click', (e) => {
@@ -1226,17 +1597,16 @@
 
   els.board.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || pendingPromotion) return;
-    if (!isLive()) {
-      showToast('Reviewing an earlier move. Press ⏭ to return to the game.');
+    if (!boardInteractive()) {
+      if (!isLive() && !game.result) showToast('Reviewing an earlier move. Press ⏭ to return to the game.');
       return;
     }
-    if (game.result) return;
     const sq = e.target.closest('.square');
     if (!sq) return;
     e.preventDefault();
 
     const r = Number(sq.dataset.r), c = Number(sq.dataset.c);
-    const state = current();
+    const state = shownState();
 
     const target = selected && targetAt(r, c);
     if (target) {
@@ -1311,15 +1681,18 @@
 
   // ---------- Controls ----------
 
+  els.modeButtons.forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
   els.newGame.addEventListener('click', () => {
-    if (game.history.length && !game.result && !game.imported && !confirm('Start a new game? The current game will be lost.')) return;
+    if (!isExplore() && game.history.length && !game.result && !game.imported &&
+        !confirm('Start a new game? The current game will be lost.')) return;
     newGame();
   });
   els.rematch.addEventListener('click', newGame);
   els.closeResult.addEventListener('click', () => hideModal(els.gameOver));
   els.review.addEventListener('click', () => {
     hideModal(els.gameOver);
-    settings.tab = 'analysis';
+    settings.tabs.play = 'analysis';
     render();
     runAnalysis();
   });
@@ -1333,7 +1706,7 @@
   });
 
   els.tabs.forEach((t) => t.addEventListener('click', () => {
-    settings.tab = t.dataset.tab;
+    settings.tabs[settings.mode] = t.dataset.tab;
     renderTabs();
     save();
   }));
@@ -1373,7 +1746,8 @@
   els.timeControl.addEventListener('change', () => {
     settings.timeControl = els.timeControl.value;
     // Apply straight away if no move has been played yet.
-    if (game.history.length === 0 && !game.imported) newGame();
+    const play = games.play;
+    if (!isExplore() && play.history.length === 0 && !play.imported) newGame();
     else save();
   });
   els.depth.addEventListener('change', () => {
@@ -1382,7 +1756,7 @@
   });
   els.autoFlip.addEventListener('change', () => {
     settings.autoFlip = els.autoFlip.checked;
-    if (settings.autoFlip) settings.flipped = current().turn === 'b';
+    if (settings.autoFlip && !isExplore()) settings.flipped = current().turn === 'b';
     render();
     save();
   });
@@ -1426,6 +1800,12 @@
 
   // ---------- Start ----------
 
-  if (!load()) newGame();
-  else render();
+  if (!load()) {
+    games.play = blankGame(C.createInitialState(), parseTimeControl(settings.timeControl));
+    games.explore = blankGame(C.createInitialState(), null);
+    game = games[settings.mode];
+    resetTransientState();
+  }
+  render();
+  loadOpenings();
 })();

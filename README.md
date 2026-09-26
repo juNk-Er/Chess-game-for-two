@@ -38,7 +38,16 @@ In the repository on GitHub: **Settings → Pages → Build and deployment → S
 - Sound effects for moves, captures, castling, check, promotion, low time and game end (can be muted).
 - **Save & resume:** the game, clocks, names, score and settings are saved automatically in the browser (localStorage). Closing or refreshing the page does not lose the game.
 
-**Reviewing**
+**Two modes**, switched with the *Play / Explore* buttons at the top. Each keeps its own board, and the Play clock pauses while you explore.
+
+**Explore mode** (study openings and positions)
+- No clock and no scoring. Move freely for both sides, and go back with ◀ to try a different move from any earlier position.
+- Shows the **opening name and ECO code** (from the Lichess opening database, about 3,800 named positions, including transpositions).
+- Lists the **book moves** from the current position with the opening each one leads to. Tap one to play it.
+- Optional **live Stockfish 19** (Engine tab): evaluation bar, the top 3 lines with arrows, updating as you move. Tap a line to play its first move.
+
+**Reviewing** (Play mode, once the game is over)
+- Stockfish is locked while a game is in progress, so it can't help either player. It unlocks when the game ends, and for imported games.
 - Step through the game with ⏮ ◀ ▶ ⏭, the arrow keys / Home / End, by clicking a move, or by clicking the evaluation graph.
 - **Analyze with Stockfish 19**, which evaluates every position and shows:
   - an evaluation bar next to the board and an evaluation graph of the whole game,
@@ -63,6 +72,7 @@ sw.js                 service worker for offline play
 engine/               Stockfish 19 (stockfish.js 19.0.0 lite single-threaded WASM build)
 assets/pieces/        SVG chess pieces
 assets/icons/         app icons
+data/openings.json    opening names by position (built by tools/build-openings.js)
 ```
 
 The rules engine is independent of the UI and also runs in Node (`require('./js/chess.js')`). Its move generator has been checked against standard perft reference counts.
@@ -70,4 +80,5 @@ The rules engine is independent of the UI and also runs in Node (`require('./js/
 ## Credits and licences
 
 - **Stockfish 19** by the Stockfish developers, compiled to WebAssembly by [stockfish.js](https://github.com/nmrugg/stockfish.js). GPLv3; see `engine/COPYING.txt`. The *lite* build uses a smaller neural network (≈1.8 MB instead of ≈99 MB) and is still far stronger than any human player.
+- **Opening names:** [lichess-org/chess-openings](https://github.com/lichess-org/chess-openings), public domain (CC0).
 - **Chess pieces:** "cburnett" set by Colin M.L. Burnett, [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/).

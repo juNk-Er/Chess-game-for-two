@@ -20,6 +20,10 @@
 <body>
   <header class="site-header">
     <h1><img src="assets/pieces/wN.svg" alt="" class="logo"> Chess for Two</h1>
+    <div class="mode-switch" role="group" aria-label="Mode">
+      <button data-mode="play" title="Play a game against a friend on this device">Play</button>
+      <button data-mode="explore" title="Explore openings and positions freely, with optional Stockfish">Explore</button>
+    </div>
   </header>
 
   <main class="layout">
@@ -52,6 +56,7 @@
       <div class="tabs" role="tablist">
         <button class="tab" role="tab" data-tab="moves">Moves</button>
         <button class="tab" role="tab" data-tab="analysis">Analysis</button>
+        <button class="tab" role="tab" data-tab="engine">Engine</button>
         <button class="tab" role="tab" data-tab="settings">Settings</button>
       </div>
 
@@ -63,7 +68,9 @@
           <button class="btn icon" id="nav-next" title="Next move (→)">▶</button>
           <button class="btn icon" id="nav-last" title="Current position (End)">⏭</button>
         </div>
+        <p id="opening" class="opening hidden"></p>
         <ol id="moves" class="moves"></ol>
+        <div id="book" class="book hidden"></div>
         <div class="pgn-actions">
           <button class="btn small" id="btn-copy-pgn">Copy PGN</button>
           <button class="btn small" id="btn-download-pgn">Download PGN</button>
@@ -73,12 +80,26 @@
 
       <!-- Analysis -->
       <section class="tab-panel" id="tab-analysis" role="tabpanel">
+        <p id="analysis-locked" class="locked">
+          🔒 Stockfish review unlocks when the game is over, so it can't help during play.
+          To study positions with the engine, switch to <b>Explore</b>.
+        </p>
         <button id="btn-analyze" class="btn primary wide">Analyze game with Stockfish 19</button>
         <div id="analysis-progress" class="progress hidden"><div class="progress-fill"></div></div>
         <p id="analysis-error" class="error hidden"></p>
         <div id="analysis-summary"></div>
         <svg id="eval-graph" class="eval-graph hidden" preserveAspectRatio="none" aria-label="Evaluation graph"></svg>
         <div id="analysis-position" class="analysis-position"></div>
+      </section>
+
+      <!-- Engine (Explore mode) -->
+      <section class="tab-panel" id="tab-engine" role="tabpanel">
+        <label class="toggle">
+          <input type="checkbox" id="engine-on">
+          <span class="toggle-track" aria-hidden="true"></span>
+          Stockfish 19 analysis
+        </label>
+        <div id="engine-lines"></div>
       </section>
 
       <!-- Settings -->

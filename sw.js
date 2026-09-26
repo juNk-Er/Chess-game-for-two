@@ -4,7 +4,7 @@
  * large static files (engine, images) are served cache-first.
  * Bump CACHE_VERSION when the list of files changes.
  */
-const CACHE_VERSION = 'chess-for-two-v1';
+const CACHE_VERSION = 'chess-for-two-v2';
 
 const PRECACHE = [
   './',
@@ -17,6 +17,7 @@ const PRECACHE = [
   'js/app.js',
   'engine/stockfish-19-lite-single.js',
   'engine/stockfish-19-lite-single.wasm',
+  'data/openings.json',
   'assets/icons/apple-touch-icon.png',
   'assets/icons/icon-192.png',
   'assets/icons/icon-512.png',
