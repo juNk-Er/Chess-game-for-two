@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Chess for Two</title>
+  <meta name="description" content="Two-player chess on one device, with Stockfish 19 game review.">
+  <meta name="theme-color" content="#1e2126">
+  <link rel="icon" href="assets/pieces/wN.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <!-- iPhone / iPad home-screen app -->
+  <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Chess">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <h1><img src="assets/pieces/wN.svg" alt="" class="logo"> Chess for Two</h1>
+  </header>
+
+  <main class="layout">
+    <section class="board-area">
+      <div class="player-bar" id="bar-top"></div>
+      <div class="board-row">
+        <div id="eval-bar" class="eval-bar invisible" aria-hidden="true">
+          <div class="eval-fill"></div>
+          <span class="eval-label"></span>
+        </div>
+        <div class="board-wrap">
+          <div id="board" class="board" aria-label="Chess board"></div>
+          <svg id="arrows" class="arrows" viewBox="0 0 8 8" aria-hidden="true"></svg>
+        </div>
+      </div>
+      <div class="player-bar" id="bar-bottom"></div>
+    </section>
+
+    <aside class="side-panel">
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+
+      <div class="controls">
+        <button id="btn-new" class="btn primary">New game</button>
+        <button id="btn-undo" class="btn" title="Undo (Ctrl+Z)">Undo</button>
+        <button id="btn-flip" class="btn">Flip board</button>
+        <button id="btn-draw" class="btn">Offer draw</button>
+        <button id="btn-resign" class="btn danger">Resign</button>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="moves">Moves</button>
+        <button class="tab" role="tab" data-tab="analysis">Analysis</button>
+        <button class="tab" role="tab" data-tab="settings">Settings</button>
+      </div>
+
+      <!-- Moves -->
+      <section class="tab-panel" id="tab-moves" role="tabpanel">
+        <div class="nav">
+          <button class="btn icon" id="nav-first" title="First position (Home)">⏮</button>
+          <button class="btn icon" id="nav-prev" title="Previous move (←)">◀</button>
+          <button class="btn icon" id="nav-next" title="Next move (→)">▶</button>
+          <button class="btn icon" id="nav-last" title="Current position (End)">⏭</button>
+        </div>
+        <ol id="moves" class="moves"></ol>
+        <div class="pgn-actions">
+          <button class="btn small" id="btn-copy-pgn">Copy PGN</button>
+          <button class="btn small" id="btn-download-pgn">Download PGN</button>
+          <button class="btn small" id="btn-import-pgn">Import PGN</button>
+        </div>
+      </section>
+
+      <!-- Analysis -->
+      <section class="tab-panel" id="tab-analysis" role="tabpanel">
+        <button id="btn-analyze" class="btn primary wide">Analyze game with Stockfish 19</button>
+        <div id="analysis-progress" class="progress hidden"><div class="progress-fill"></div></div>
+        <p id="analysis-error" class="error hidden"></p>
+        <div id="analysis-summary"></div>
+        <svg id="eval-graph" class="eval-graph hidden" preserveAspectRatio="none" aria-label="Evaluation graph"></svg>
+        <div id="analysis-position" class="analysis-position"></div>
+      </section>
+
+      <!-- Settings -->
+      <section class="tab-panel" id="tab-settings" role="tabpanel">
+        <div class="settings">
+          <fieldset>
+            <legend>Players</legend>
+            <label>White <input type="text" id="name-w" maxlength="24" autocomplete="off"></label>
+            <label>Black <input type="text" id="name-b" maxlength="24" autocomplete="off"></label>
+            <div class="row">
+              <button class="btn small" id="btn-swap">Swap sides</button>
+              <button class="btn small" id="btn-reset-score">Reset score</button>
+            </div>
+            <p id="score-line" class="score-line"></p>
+          </fieldset>
+
+          <label>
+            Time control <small>(applies to the next game)</small>
+            <select id="time-control">
+              <option value="0,0">No clock</option>
+              <option value="1,0">1 min</option>
+              <option value="3,2">3 min + 2 s</option>
+              <option value="5,0">5 min</option>
+              <option value="10,0">10 min</option>
+              <option value="15,10">15 min + 10 s</option>
+              <option value="30,0">30 min</option>
+            </select>
+          </label>
+          <label>
+            Analysis depth
+            <select id="analysis-depth">
+              <option value="10">Quick (depth 10)</option>
+              <option value="14">Normal (depth 14)</option>
+              <option value="18">Deep (depth 18)</option>
+              <option value="22">Very deep (depth 22)</option>
+            </select>
+          </label>
+          <label class="checkbox"><input type="checkbox" id="auto-flip"> Flip board after each move</label>
+          <label class="checkbox"><input type="checkbox" id="sound-on"> Sound effects</label>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <footer class="site-footer">
+    Analysis by <a href="https://stockfishchess.org/" target="_blank" rel="noopener">Stockfish 19</a> (GPLv3).
+    Pieces by Colin M.L. Burnett (CC BY-SA 3.0).
+  </footer>
+
+  <!-- Promotion -->
+  <div id="promotion" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="promo-title">
+    <div class="modal-box">
+      <h3 id="promo-title">Promote pawn to</h3>
+      <div id="promo-choices" class="promo-choices"></div>
+    </div>
+  </div>
+
+  <!-- Game over -->
+  <div id="game-over" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="result-title">
+    <div class="modal-box">
+      <h3 id="result-title"></h3>
+      <p id="result-reason"></p>
+      <div class="modal-actions">
+        <button id="btn-review" class="btn primary">Review with Stockfish</button>
+        <button id="btn-close-result" class="btn">View board</button>
+        <button id="btn-rematch" class="btn">New game</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PGN import -->
+  <div id="import" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <div class="modal-box import-box">
+      <h3 id="import-title">Import a game (PGN)</h3>
+      <textarea id="pgn-input" rows="10" spellcheck="false"
+        placeholder='[White "Alice"]&#10;[Black "Bob"]&#10;&#10;1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *'></textarea>
+      <label class="file-label">…or open a .pgn file <input type="file" id="pgn-file" accept=".pgn,.txt,text/plain"></label>
+      <p id="import-error" class="error hidden"></p>
+      <div class="modal-actions">
+        <button id="btn-import-cancel" class="btn">Cancel</button>
+        <button id="btn-import-load" class="btn primary">Load game</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="js/chess.js"></script>
+  <script src="js/sound.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    // Offline support (needs http/https; skipped when the page is opened as a file).
+    if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+    }
+  </script>
+</body>
+</html>
